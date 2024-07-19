@@ -1,0 +1,3 @@
+[submodule "MobileNetV1-PyTorch"]
+	path = MobileNetV1-PyTorch
+	url = https://github.com/hardingyan/MobileNetV1-PyTorch
