@@ -1,33 +1,38 @@
 import torch
 import matplotlib.pyplot as plt
+import sys
+import numpy as np
 
-from model import Net
+from PIL import Image
+
+from model import CNN
 from utils import evaluate, get_data
 
-def infer():
+
+if __name__=="__main__":
     _ , test_data = get_data()
 
-    net0 = Net()
-    net0.load_state_dict(torch.load("model_weight_dict.pth"))
-    net0.eval()
-    print("infer accuracy:", evaluate(test_data, net0))
+    model = CNN(1)
+    model.load_state_dict(torch.load("model_weight_dict.pth"))
+    model.eval()
+    # print("infer accuracy:", evaluate(test_data, model))
 
     # print("Model's state_dict:")
     # for param_tensor in net.state_dict():
     #     print(param_tensor, "\t", net.state_dict()[param_tensor].size())
 
-    net1 = torch.load("model.pth")
-    net1.eval()
-    print("infer accuracy:", evaluate(test_data, net1))
-
-    for (n, (x, _)) in enumerate(test_data):
-        if n >= 1:
-            break
-        predict = torch.argmax(net1.forward(x[0].view(-1, 28*28)))
-        plt.figure(n)
-        plt.imshow(x[0].view(28, 28))
-        plt.title("prediction: " + str(int(predict)))
+    if len(sys.argv) >= 2:
+        image_path = sys.argv[1]
+        image = Image.open(image_path)
+        image = image.convert('L')
+        image = np.array(image)
+        image = np.expand_dims(image, axis=0)
+        image = torch.from_numpy(image).float()
+    else:
+        image, _ = next(iter(test_data))
+        image = image[0]
+    
+    predict = torch.argmax(model.forward(image))
+    plt.imshow(image[0])
+    plt.title("prediction: " + str(int(predict)))
     plt.show()
-
-if __name__=="__main__":
-    infer()
