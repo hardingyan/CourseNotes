@@ -25,14 +25,16 @@ if __name__=="__main__":
         image_path = sys.argv[1]
         image = Image.open(image_path)
         image = image.convert('L')
+        width, height = image.size
         image = np.array(image)
-        image = np.expand_dims(image, axis=0)
+        image = image.reshape((1, 1, height, width)) # [1, 1, h, w]
         image = torch.from_numpy(image).float()
     else:
-        image, _ = next(iter(test_data))
-        image = image[0]
+        image, _ = next(iter(test_data)) # [32, 1, h, w]
+        image = np.expand_dims(image[0], axis=0) # [1, 1, h, w]
+        image = torch.from_numpy(image).float()
     
-    predict = torch.argmax(model.forward(image))
-    plt.imshow(image[0])
+    predict = torch.argmax(model.forward(image)) 
+    plt.imshow(image[0][0]) # [h, w]
     plt.title("prediction: " + str(int(predict)))
     plt.show()
