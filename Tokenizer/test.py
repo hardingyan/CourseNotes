@@ -1,5 +1,5 @@
 
-from BPE import BasicTokenizer
+from BPE import BasicTokenizer, FastTokenizer
 
 text = """
 "Cornerstone" is a plain word, not flashy, but it can accurately convey our emotions and confidence in the grand edifice of Chinese science fiction under construction. Therefore, we use it as the name of this original series of books.
@@ -20,14 +20,12 @@ Friends will see that the first issue of the serialization is almost not science
 In the future, readers will walk through the spiritual journey I have walked in the past year. Frankly speaking, I don't know what you will see on this dark and strange path, and I am very uneasy. But science fiction has come to this day, and it is fate to be able to walk such a long way with everyone.
 """
 
-# text = "今天天气真好"
+tokenizer = FastTokenizer()
+tokenizer.train(text, 200 + 256)
 
-bt = BasicTokenizer()
-bt.train(text, 200)
-
-test_text = "tom"
-e = bt.encode(test_text)
+test_text = "今天天气真好"
+e = tokenizer.encode(test_text)
 print(f"encode {test_text} to {e}")
 
-t = bt.decode(e)
+t = tokenizer.decode(e)
 print(f"decode {e} to {t}")

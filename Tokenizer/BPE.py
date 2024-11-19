@@ -3,11 +3,14 @@ from collections import defaultdict
 
 class BasicTokenizer:
     def train(self, text, token_list_length):
+        assert(token_list_length >= 256)
+        num_merge = token_list_length - 256
+
         byte_flow = BasicTokenizer.text_2_byte_flow(text)
 
         self.encode_rules = list() # pair, new token
 
-        for merge0 in range(token_list_length):
+        for merge0 in range(num_merge):
             pair2count = BasicTokenizer.get_stats(byte_flow)
             most_pair = BasicTokenizer.get_most_count_pair(pair2count)
 
@@ -64,13 +67,8 @@ class BasicTokenizer:
 
     @staticmethod
     def get_most_count_pair(pair2count):
-        most_pair = None
-        max_count = None
-        for pair, count in pair2count.items():
-            if max_count is None or max_count < count:
-                most_pair = pair
-                max_count = count
-        return most_pair
+        pair = max(pair2count, key = pair2count.get) 
+        return pair
 
     @staticmethod
     def merge(byte_flow, pair, idx):
@@ -90,3 +88,46 @@ class BasicTokenizer:
                 new_byte_flow.append(byte_flow[i])
                 i += 1
         return new_byte_flow
+
+#  Ref: https://github.com/karpathy/minbpe/blob/master/minbpe/basic.py
+class FastTokenizer(BasicTokenizer):
+    def train(self, text, token_list_length):
+        assert(token_list_length >= 256)
+
+        byte_flow = BasicTokenizer.text_2_byte_flow(text)
+
+        encode_rules = dict()
+        token_2_byte_flow = {idx: bytes([idx]) for idx in range(256)}
+
+        num_merge = token_list_length - 256
+
+        for merge0 in range(num_merge):
+            pair2count = BasicTokenizer.get_stats(byte_flow)
+            most_pair = BasicTokenizer.get_most_count_pair(pair2count)
+            new_token = 256 + merge0
+            byte_flow = BasicTokenizer.merge(byte_flow, most_pair, new_token)
+
+            encode_rules[most_pair] = new_token
+            token_2_byte_flow[new_token] = token_2_byte_flow[most_pair[0]] + token_2_byte_flow[most_pair[1]]
+
+        self.encode_rules = encode_rules
+        self.token_2_byte_flow = token_2_byte_flow
+
+    def encode(self, text):
+        byte_flow = BasicTokenizer.text_2_byte_flow(text)
+        while len(byte_flow) >= 2:
+            # merge one pair once a loop 
+            # the merge sequence is same to the train, the pair with the lowest merge index should be merged first.
+            pair2count = BasicTokenizer.get_stats(byte_flow)
+            pair = min(pair2count, key = lambda p: self.encode_rules.get(p, float("inf")))
+            if pair not in self.encode_rules:
+                break
+            token_byte = self.encode_rules[pair]
+            byte_flow = BasicTokenizer.merge(byte_flow, pair, token_byte)
+        return byte_flow
+
+    def decode(self, byte_flow):
+        decode_byte_flow = b"".join(self.token_2_byte_flow[byte] for byte in byte_flow)
+        original_str = decode_byte_flow.decode('utf-8')
+
+        return original_str
