@@ -4,47 +4,197 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-from TransformerRef import SelfAttentionRef
-from Transformer import SelfAttention
+from Ref import paged_attention
+from Ref import attention
+from Ref import flash_attention_v2
 
-def diff(act, ref):
-    act = act.detach().numpy()
-    ref = ref.detach().numpy()
+from FlashAttentionV2 import paged_flash_attention_v2 as paged_attention_act
 
-    assert act.shape == ref.shape
 
-    ref = ref.flatten()
-    act = act.flatten()
 
-    absDiff = abs(ref - act)
-    maxAbsDiff = max(abs(ref - act))
-    rangeV = max(abs(ref))
-    relDiff = maxAbsDiff / rangeV
+def compute_diff(array1, ref_array2, idx_cnt=5):
+    assert (
+        array1.shape == ref_array2.shape
+    ), f"Shape mismatch between arrays, {array1.shape} and {ref_array2.shape}"
 
-    print('[Absolute] avgErr= %g, maxErr= %g' % (np.average(maxAbsDiff), maxAbsDiff))
-    print('[Relative] avgErr= %g%%, maxErr=%g%%' % (np.average(relDiff) * 100, relDiff.max() * 100))
+    abs_diff = np.abs(array1 - ref_array2)
 
-    None
+    max_abs_diff = abs_diff.max()
+    range_ref = np.abs(ref_array2).max()
+
+    max_rel_diff = max_abs_diff / range_ref.max()
+
+    idx_cnt = min(idx_cnt, abs_diff.size)
+
+    flat_indices = np.argsort(abs_diff.ravel())[-idx_cnt:][::-1]
+
+    top_indices = np.array(np.unravel_index(flat_indices, abs_diff.shape)).T
+
+    return max_abs_diff, max_rel_diff, top_indices
+
+
+def print_diff(arr_act, arr_ref, tag_act, tag_ref, abs_diff, rel_diff, top_indices, eps):
+    if rel_diff < eps:
+        print(f"{tag_act} vs {tag_ref} Pass!")
+        return
+
+    print("-" * 65)
+    print(f"{tag_act} vs {tag_ref}, abs err {abs_diff}, ref err {rel_diff}")
+
+    print(f"{'Index':<20} {tag_act:<15} {tag_ref:<15} {'Abs Diff':<15}")
+
+    for idx in top_indices:
+        act_val = arr_act[tuple(idx)]
+        ref_val = arr_ref[tuple(idx)]
+        idx_diff = abs(act_val - ref_val)
+
+        idx_str = str(tuple(map(int, idx)))
+
+        if isinstance(act_val, (int, np.integer)):
+            print(f"{idx_str:<20} {act_val:<15} {ref_val:<15} {idx_diff:<15}")
+        else:
+            print(f"{idx_str:<20} {act_val:<15.6f} {ref_val:<15.6f} {idx_diff:<15.6f}")
+
+
+def generate_seq_lengths(seq_len, num_batches):
+    """
+    Randomly distributes a total sequence length (seq_len)
+    across multiple requests, returning sorted lengths that sum to seq_len.
+
+    Example: generate_seq_lengths(6, 2) might return [2, 4]
+    (two requests with 2,4 tokens each)
+    """
+    if seq_len == 0:
+        return [0] * num_batches
+    seq_lengths = list(
+        np.random.choice(range(1, seq_len), size=num_batches - 1, replace=False)
+    )
+    seq_lengths.append(0)
+    seq_lengths.append(seq_len)
+    seq_lengths = sorted(seq_lengths)
+    seq_lengths = [seq_lengths[i + 1] - seq_lengths[i] for i in range(num_batches)]
+    seq_lengths = sorted(seq_lengths)
+    return seq_lengths
+
+
+def get_prefill_mask(mask_size: int, dtype=torch.float16, device="cpu") -> torch.Tensor:
+    mask = torch.tril(torch.ones(mask_size, mask_size), diagonal=0).to(dtype).to(device)
+    mask[mask == 0] = float("-inf")
+    mask[mask == 1] = 0
+
+    return mask
+
+
+def test_paged_attention(
+    num_batches, batch_seq_len, batch_kv_len, num_heads, num_kv_heads, head_size
+):
+    # q: [batch_seq_len, num_heads, qk_head_size]
+    # k_cache: [num_pages, page_size, num_kv_heads, qk_head_size]
+    # v_cache: [num_pages, page_size, num_kv_heads, v_head_size]
+    # block_table: [num_batches, num_pages]
+    # seq_lengths_host: [num_batches]
+    # kv_lengths_host: [num_batches]
+
+    assert batch_kv_len >= batch_seq_len
+
+    dtype = torch.float16
+    device = "cpu"
+
+    seq_lengths_host = generate_seq_lengths(batch_seq_len, num_batches)
+    history_kv_len = batch_kv_len - batch_seq_len
+    history_kv_lengths = generate_seq_lengths(history_kv_len, num_batches)
+    kv_lengths_host = [
+        seq + hist for seq, hist in zip(seq_lengths_host, history_kv_lengths)
+    ]
+
+    page_size = 128
+    num_pages = sum(
+        [(kv_len + page_size - 1) // page_size for kv_len in kv_lengths_host]
+    )
+
+    q = torch.randn(batch_seq_len, num_heads, head_size, dtype=dtype, device=device)
+    k_cache = torch.randn(
+        (num_pages, page_size, num_kv_heads, head_size),
+        dtype=dtype,
+        device=device,
+    )
+    v_cache = torch.randn(
+        (num_pages, page_size, num_kv_heads, head_size),
+        dtype=dtype,
+        device=device,
+    )
+
+    block_table = torch.stack(
+        [
+            torch.randperm(num_pages, dtype=torch.int32, device=device)
+            for _ in range(num_batches)
+        ]
+    )
+
+    mask_size = 2048
+    mask = get_prefill_mask(mask_size, dtype=dtype, device=device)
+
+    print(f"{seq_lengths_host=}")
+    print(f"{kv_lengths_host=}")
+    print(f"{q.shape=}")
+    print(f"{k_cache.shape=}")
+    print(f"{v_cache.shape=}")
+    print(f"{block_table.shape=}")
+    print(f"{mask.shape=}")
+
+    out_ref = paged_attention(
+        q=q,
+        k_cache=k_cache,
+        v_cache=v_cache,
+        block_table=block_table,
+        seq_lengths_host=seq_lengths_host,
+        kv_lengths_host=kv_lengths_host,
+        mask=mask,
+        qk_scale=None,
+        attentionFunc=attention,
+    )
+
+    out_act =  paged_attention(
+        q=q,
+        k_cache=k_cache,
+        v_cache=v_cache,
+        block_table=block_table,
+        seq_lengths_host=seq_lengths_host,
+        kv_lengths_host=kv_lengths_host,
+        mask=mask,
+        qk_scale=None,
+        attentionFunc=flash_attention_v2,
+    )
+
+    print(f"{out_act.shape=}")
+
+    out_act = out_act.detach().numpy()
+    out_ref = out_ref.detach().numpy()
+
+    abs_error, rel_error, top_indices = compute_diff(out_act, out_ref, idx_cnt=20)
+    print_diff(
+        out_act, out_ref, "act", "ref", abs_error, rel_error, top_indices, eps=1e-1
+    )
+
+
+def main():
+    """
+    kv_lengths contains the total sequence length for each request,
+    including both the context length (historical tokens) and the current query.
+    For example, if a sequence has 5 previous tokens and is currently decoding
+    the 6th token, then kv_lengths = 5 + 1 = 6.
+    """
+    # num_batches, batch_seq_len, batch_kv_len, num_heads, num_kv_heads, head_size
+
+    print("===Test prefill===")
+    test_paged_attention(2, 100, 100, 16, 4, 128)
+
+    print("===Test chunk prefill===")
+    test_paged_attention(2, 100, 200, 16, 4, 128)
+
+    print("===Test decode===")
+    test_paged_attention(2, 2, 100, 16, 4, 128)
+
 
 if __name__ == "__main__":
-    emb = 64
-
-    WShape = (emb, emb)
-
-    Wq = torch.rand(WShape, dtype = torch.float)
-    Wk = torch.rand(WShape, dtype = torch.float)
-    Wv = torch.rand(WShape, dtype = torch.float)
-    Wunifyheads = torch.rand(WShape, dtype = torch.float)
-
-    attentionRef = SelfAttentionRef(Wq, Wk, Wv, Wunifyheads, emb, heads=4, mask=False, kqnorm=False, scalefactor=None)
-    attentionAct = SelfAttention(Wq, Wk, Wv, Wunifyheads, emb, heads=4, mask=False, kqnorm=False, scalefactor=None)
-
-    b = 1
-    t = 10
-
-    input = torch.rand((b, t, emb), dtype = torch.float)
-
-    outputRef = attentionRef(input)
-    outputAct = attentionAct(input)
-
-    diff(outputAct, outputRef)
+    main()
