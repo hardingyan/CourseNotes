@@ -4,7 +4,7 @@ import torch
 from diff_tensors import compute_diff, print_diff
 
 from Ref import paged_attention, attention, flash_attention_v2
-from FlashAttentionV2 import paged_flash_attention_v2 as paged_attention_act
+from FlashAttentionV2 import paged_flash_attention_v2
 
 
 def generate_seq_lengths(seq_len, num_batches):
@@ -37,12 +37,18 @@ def get_prefill_mask(mask_size: int, dtype=torch.float16, device="cpu") -> torch
 
 
 def test_paged_attention(
-    num_batches, batch_seq_len, batch_kv_len, num_heads, num_kv_heads, head_size
+    num_batches,
+    batch_seq_len,
+    batch_kv_len,
+    num_heads,
+    num_kv_heads,
+    head_size,
+    **kwargs,
 ):
     # q: [batch_seq_len, num_heads, qk_head_size]
     # k_cache: [num_pages, page_size, num_kv_heads, qk_head_size]
     # v_cache: [num_pages, page_size, num_kv_heads, v_head_size]
-    # block_table: [num_batches, num_pages]
+    # page_table: [num_batches, num_pages]
     # seq_lengths_host: [num_batches]
     # kv_lengths_host: [num_batches]
 
@@ -58,7 +64,10 @@ def test_paged_attention(
         seq + hist for seq, hist in zip(seq_lengths_host, history_kv_lengths)
     ]
 
-    page_size = 128
+    seq_lengths_host = kwargs.get("seq_lengths_host", seq_lengths_host)
+    kv_lengths_host = kwargs.get("kv_lengths_host", kv_lengths_host)
+
+    page_size = 16
     num_pages = sum(
         [(kv_len + page_size - 1) // page_size for kv_len in kv_lengths_host]
     )
@@ -75,7 +84,7 @@ def test_paged_attention(
         device=device,
     )
 
-    block_table = torch.stack(
+    page_table = torch.stack(
         [
             torch.randperm(num_pages, dtype=torch.int32, device=device)
             for _ in range(num_batches)
@@ -90,14 +99,14 @@ def test_paged_attention(
     print(f"{q.shape=}")
     print(f"{k_cache.shape=}")
     print(f"{v_cache.shape=}")
-    print(f"{block_table.shape=}")
+    print(f"{page_table.shape=}")
     print(f"{mask.shape=}")
 
     out_ref = paged_attention(
         q=q,
         k_cache=k_cache,
         v_cache=v_cache,
-        block_table=block_table,
+        page_table=page_table,
         seq_lengths_host=seq_lengths_host,
         kv_lengths_host=kv_lengths_host,
         mask=mask,
@@ -109,13 +118,24 @@ def test_paged_attention(
         q=q,
         k_cache=k_cache,
         v_cache=v_cache,
-        block_table=block_table,
+        page_table=page_table,
         seq_lengths_host=seq_lengths_host,
         kv_lengths_host=kv_lengths_host,
         mask=mask,
         qk_scale=None,
         attentionFunc=flash_attention_v2,
     )
+
+    # out_act =  paged_flash_attention_v2(
+    #     q=q,
+    #     k_cache=k_cache,
+    #     v_cache=v_cache,
+    #     page_table=page_table,
+    #     seq_lengths_host=seq_lengths_host,
+    #     kv_lengths_host=kv_lengths_host,
+    #     mask=mask,
+    #     qk_scale=None,
+    # )
 
     print(f"{out_act.shape=}")
 

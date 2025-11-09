@@ -11,7 +11,7 @@ def get_kv(
     kv_lengths_host: list,
 ):
     """
-    Get k and v tensors from the cache based on the block table and kv lengths.
+    Get k and v tensors from the cache based on the page_table and kv lengths.
     """
     k = []
     v = []
@@ -23,21 +23,21 @@ def get_kv(
     v_head_size = v_cache.shape[3]
 
     # map from kv id to page id, eg: [0, 2, 11, 7, ...]
-    # means the 0th kv block is stored in page 0, 1st kv block is stored in page 2, etc.
+    # means the 0th kv page is stored in page 0, 1st kv page is stored in page 2, etc.
     mapping_kv_id_2_page_id = page_table[batch_idx]
 
     for kv_len0 in range(0, kv_len, page_size):
         kv_idx = kv_len0 // page_size
         page_id = mapping_kv_id_2_page_id[kv_idx]
 
-        k_cache_block = k_cache[page_id]
-        v_cache_block = v_cache[page_id]
+        k_cache_page = k_cache[page_id]
+        v_cache_page = v_cache[page_id]
 
-        k_cache_block = k_cache_block.view(page_size, num_kv_heads, qk_head_size)
-        v_cache_block = v_cache_block.view(page_size, num_kv_heads, v_head_size)
+        k_cache_page = k_cache_page.view(page_size, num_kv_heads, qk_head_size)
+        v_cache_page = v_cache_page.view(page_size, num_kv_heads, v_head_size)
 
-        k.append(k_cache_block)
-        v.append(v_cache_block)
+        k.append(k_cache_page)
+        v.append(v_cache_page)
 
     k = torch.stack(k, dim=0)
     v = torch.stack(v, dim=0)
@@ -95,10 +95,10 @@ def attention(
     alibi_mask: bool = False,
 ):
     """
-    q: [seq_len, num_heads, qk_head_size]
-    k: [kv_len, num_kv_heads, qk_head_size]
-    v: [kv_len, num_kv_heads, v_head_size]
-    mask: [max_col_size, max_col_size]
+    q: (seq_len, num_heads, qk_head_size)
+    k: (kv_len, num_kv_heads, qk_head_size)
+    v: (kv_len, num_kv_heads, v_head_size)
+    mask: (max_col_size, max_col_size)
     """
 
     seq_len, num_heads, qk_head_size = q.size()
@@ -120,12 +120,7 @@ def attention(
     weight = torch.bmm(q, kT)  # [num_heads, seq_len, kv_len]
     weight = weight * qk_scale
 
-    # if mask is not None and mask.numel() > 0:
-    #     mask_start = kv_len - seq_len
-    #     mask_slice = mask[mask_start:kv_len, :kv_len]
-    #     weight = weight + mask_slice.unsqueeze(0)
-    
-    if seq_len != 1 and mask is not None:
+    if mask is not None:
         mask_start = kv_len - seq_len
         mask_slice = mask[mask_start:kv_len, :kv_len]
         weight = weight + mask_slice.unsqueeze(0)
@@ -145,10 +140,11 @@ def flash_attention_v2(
     alibi_mask: bool = False,
 ):
     """
-    q: [seq_len, num_heads, qk_head_size]
-    k_cache: [kv_len, num_kv_heads, qk_head_size]
-    v_cache: [kv_len, num_kv_heads, v_head_size]
-    mask: [max_col_size, max_col_size]
+    q: (seq_len, num_heads, qk_head_size)
+    k_cache: (kv_len, num_kv_heads, qk_head_size)
+    v_cache: (kv_len, num_kv_heads, v_head_size)
+    mask: (max_col_size, max_col_size)
+    qk_scale: float
     """
 
     seq_len = q.shape[0]
@@ -216,7 +212,7 @@ def flash_attention_v2(
             col_slice = slice(j * Bc_size, (j + 1) * Bc_size)
 
             if (j + 1) * Bc_size > kv_len:
-                # |---row_slice_real---|--row_slice_padding--|
+                # |---col_slice_real---|--col_slice_padding--|
                 col_slice_real = slice(j * Bc_size, kv_len)
                 col_slice_padding = (j + 1) * Bc_size - kv_len
             else:
@@ -267,11 +263,11 @@ def flash_attention_v2(
                 k_slice, v_slice, dim=0, n_rep=num_heads // num_kv_heads
             )
 
-            # [num_heads, Br_size, Bc_size]
+            # (num_heads, Br_size, Bc_size)
             S_ij = torch.bmm(q_slice, k_slice.transpose(1, 2))
             S_ij = S_ij * qk_scale
 
-            if seq_len != 1 and mask is not None:
+            if mask is not None:
                 mask_row_slice_start = row_slice.start + (kv_len - seq_len)
                 mask_row_slice_stop = row_slice.stop + (kv_len - seq_len)
                 mask_row_slice = slice(mask_row_slice_start, mask_row_slice_stop)
@@ -281,12 +277,12 @@ def flash_attention_v2(
             m_ij, _ = torch.max(S_ij, dim=-1, keepdim=False)
             m_new = torch.max(m, m_ij)
 
-            # [num_heads, Br_size, Bc_size]
+            # (num_heads, Br_size, Bc_size)
             P_ij = torch.exp(S_ij - m_new.unsqueeze(-1))
             l_ij = torch.sum(P_ij, dim=-1, keepdim=False) + 1e-10
             l_new = torch.exp(m - m_new) * l + l_ij
 
-            # [num_heads, Br_size, v_head_size]
+            # (num_heads, Br_size, v_head_size)
             o_slice = (torch.exp(m - m_new).unsqueeze(-1) * o_slice) + (
                 torch.bmm(P_ij, v_slice)
             )
@@ -312,7 +308,7 @@ def paged_attention(
     q,
     k_cache,
     v_cache,
-    block_table,
+    page_table,
     seq_lengths_host,
     kv_lengths_host,
     mask,
@@ -320,12 +316,12 @@ def paged_attention(
     attentionFunc=None,
 ):
     """
-    q: [batch_seq_len, num_heads, qk_head_size]
-    k_cache: [num_pages, page_size, num_kv_heads, qk_head_size]
-    v_cache: [num_pages, page_size, num_kv_heads, v_head_size]
-    block_table: [num_batches, num_pages]
-    seq_lengths_host: [num_batches]
-    kv_lengths_host: [num_batches]
+    q: (batch_seq_len, num_heads, qk_head_size)
+    k_cache: (num_pages, page_size, num_kv_heads, qk_head_size)
+    v_cache: (num_pages, page_size, num_kv_heads, v_head_size)
+    page_table: (num_batches, num_pages)
+    seq_lengths_host: (num_batches)
+    kv_lengths_host: (num_batches)
     attentionFunc: attention function
     """
     if attentionFunc is None:
@@ -344,11 +340,11 @@ def paged_attention(
             batch_idx,
             k_cache,
             v_cache,
-            block_table,
+            page_table,
             kv_lengths_host,
         )
 
-        out = attentionFunc(q_batch, k_batch, v_batch, mask, qk_scale)
+        out = attentionFunc(q_batch, k_batch, v_batch, mask.clone(), qk_scale)
 
         outs.append(out)
         offset += seq_len
