@@ -120,7 +120,7 @@ def attention(
     weight = torch.bmm(q, kT)  # [num_heads, seq_len, kv_len]
     weight = weight * qk_scale
 
-    if mask is not None:
+    if seq_len != 1 and mask is not None:
         mask_start = kv_len - seq_len
         mask_slice = mask[mask_start:kv_len, :kv_len]
         weight = weight + mask_slice.unsqueeze(0)
@@ -267,7 +267,8 @@ def flash_attention_v2(
             S_ij = torch.bmm(q_slice, k_slice.transpose(1, 2))
             S_ij = S_ij * qk_scale
 
-            if mask is not None:
+            # Note: For decoding, set padded columns values to -inf.
+            if (seq_len != 1 or col_slice_real is not None) and mask is not None:
                 mask_row_slice_start = row_slice.start + (kv_len - seq_len)
                 mask_row_slice_stop = row_slice.stop + (kv_len - seq_len)
                 mask_row_slice = slice(mask_row_slice_start, mask_row_slice_stop)
