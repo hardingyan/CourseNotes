@@ -111,10 +111,10 @@ def test_paged_attention(
         kv_lengths_host=kv_lengths_host,
         mask=mask,
         qk_scale=None,
-        attentionFunc=attention,
+        attentionFunc=flash_attention_v2,
     )
 
-    out_act =  paged_attention(
+    out_act = paged_flash_attention_v2(
         q=q,
         k_cache=k_cache,
         v_cache=v_cache,
@@ -123,19 +123,7 @@ def test_paged_attention(
         kv_lengths_host=kv_lengths_host,
         mask=mask,
         qk_scale=None,
-        attentionFunc=flash_attention_v2,
     )
-
-    # out_act =  paged_flash_attention_v2(
-    #     q=q,
-    #     k_cache=k_cache,
-    #     v_cache=v_cache,
-    #     page_table=page_table,
-    #     seq_lengths_host=seq_lengths_host,
-    #     kv_lengths_host=kv_lengths_host,
-    #     mask=mask,
-    #     qk_scale=None,
-    # )
 
     print(f"{out_act.shape=}")
 

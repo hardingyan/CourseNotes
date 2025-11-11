@@ -2,6 +2,9 @@ import math
 
 import torch
 
+import config_logger
+from loguru import logger
+
 
 def get_kv(
     batch_idx: int,
@@ -314,7 +317,7 @@ def paged_attention(
     kv_lengths_host,
     mask,
     qk_scale=None,
-    attentionFunc=None,
+    attentionFunc=flash_attention_v2,
 ):
     """
     q: (batch_seq_len, num_heads, qk_head_size)
@@ -325,9 +328,6 @@ def paged_attention(
     kv_lengths_host: (num_batches)
     attentionFunc: attention function
     """
-    if attentionFunc is None:
-        attentionFunc = attention
-
     num_batches = len(seq_lengths_host)
 
     outs = []
