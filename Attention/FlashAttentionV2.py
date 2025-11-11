@@ -15,10 +15,10 @@ def flash_attention_v2_single_batch(
     q, k_cache, v_cache, page_table, kv_len, mask, qk_scale=None
 ):
     """
-    q: [seq_len, num_heads, qk_head_size]
-    k_cache: [num_pages, page_size, num_kv_heads, qk_head_size]
-    v_cache: [num_pages, page_size, num_kv_heads, v_head_size]
-    page_table: [num_pages]
+    q: (seq_len, num_heads, qk_head_size)
+    k_cache: (num_pages, page_size, num_kv_heads, qk_head_size)
+    v_cache: (num_pages, page_size, num_kv_heads, v_head_size)
+    page_table: (num_pages)
     kv_len:
     """
 
@@ -218,12 +218,12 @@ def paged_flash_attention_v2(
     qk_scale=None,
 ):
     """
-    q: [batch_seq_len, num_heads, qk_head_size]
-    k_cache: [num_pages, page_size, num_kv_heads, qk_head_size]
-    v_cache: [num_pages, page_size, num_kv_heads, v_head_size]
-    page_table: [num_batches, num_pages]
-    seq_lengths_host: [num_batches]
-    kv_lengths_host: [num_batches]
+    q: (batch_seq_len, num_heads, qk_head_size)
+    k_cache: (num_pages, page_size, num_kv_heads, qk_head_size)
+    v_cache: (num_pages, page_size, num_kv_heads, v_head_size)
+    page_table: (num_batches, num_pages)
+    seq_lengths_host: (num_batches)
+    kv_lengths_host: (num_batches)
     """
     num_batches = len(seq_lengths_host)
 

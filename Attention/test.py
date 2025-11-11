@@ -45,12 +45,12 @@ def test_paged_attention(
     head_size,
     **kwargs,
 ):
-    # q: [batch_seq_len, num_heads, qk_head_size]
-    # k_cache: [num_pages, page_size, num_kv_heads, qk_head_size]
-    # v_cache: [num_pages, page_size, num_kv_heads, v_head_size]
-    # page_table: [num_batches, num_pages]
-    # seq_lengths_host: [num_batches]
-    # kv_lengths_host: [num_batches]
+    # q: (batch_seq_len, num_heads, qk_head_size)
+    # k_cache: (num_pages, page_size, num_kv_heads, qk_head_size)
+    # v_cache: (num_pages, page_size, num_kv_heads, v_head_size)
+    # page_table: (num_batches, num_pages)
+    # seq_lengths_host: (num_batches)
+    # kv_lengths_host: (num_batches)
 
     assert batch_kv_len >= batch_seq_len
 
@@ -94,8 +94,8 @@ def test_paged_attention(
     mask_size = 2048
     mask = get_prefill_mask(mask_size, dtype=dtype, device=device)
 
-    print(f"{seq_lengths_host=}")
-    print(f"{kv_lengths_host=}")
+    print(f"seq_lengths_host {str(tuple(map(int, seq_lengths_host)))}")
+    print(f"kv_lengths_host {str(tuple(map(int, kv_lengths_host)))}")
     print(f"{q.shape=}")
     print(f"{k_cache.shape=}")
     print(f"{v_cache.shape=}")
