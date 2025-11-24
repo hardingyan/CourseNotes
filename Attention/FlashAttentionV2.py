@@ -40,26 +40,6 @@ def flash_attention_v2_single_batch(
 
     assert Bc_size == page_size
 
-    q_on_chip_mem = Br_size * num_heads * qk_head_size
-    k_on_chip_mem = Bc_size * num_kv_heads * qk_head_size
-    o_on_chip_mem = Br_size * num_heads * v_head_size
-    m_on_chip_mem = Br_size * num_heads
-    l_on_chip_mem = m_on_chip_mem
-    v_on_chip_mem = Bc_size * num_kv_heads * v_head_size
-    qkT_on_chip_mem = Br_size * num_heads * Bc_size
-
-    total_on_chip_mem = (
-        Br_size
-        * (
-            num_heads * qk_head_size
-            + num_kv_heads * qk_head_size
-            + num_heads * v_head_size
-            + 2 * num_heads
-        )
-        + Bc_size * (num_kv_heads * v_head_size)
-        + Br_size * num_heads * Bc_size
-    )
-
     Br_num = (seq_len + Br_size - 1) // Br_size
     Bc_num = (kv_len + Bc_size - 1) // Bc_size
 
@@ -70,22 +50,12 @@ def flash_attention_v2_single_batch(
     num_groups = num_kv_heads
     group_size = num_heads // num_groups
 
+    out = out.view(seq_len, num_groups, group_size, v_head_size)
+
     logger.debug(f"{Br_num=}, {Bc_num=}")
 
     for Br_idx in range(Br_num):
         logger.debug(f"{Br_idx=}")
-        o_slice = torch.zeros(
-            Br_size, num_heads, v_head_size, dtype=dtype, device=device
-        )
-        l = torch.zeros(Br_size, num_heads, dtype=dtype, device=device)
-        m = (
-            torch.ones(Br_size, num_heads, dtype=dtype, device=device)
-            * torch.finfo(dtype).min
-        )
-
-        o_slice = o_slice.reshape(Br_size, num_groups, group_size, v_head_size)
-        l = l.reshape(Br_size, num_groups, group_size)
-        m = m.reshape(Br_size, num_groups, group_size)
 
         row_slice = slice(Br_idx * Br_size, (Br_idx + 1) * Br_size)
         if (Br_idx + 1) * Br_size > seq_len:
@@ -111,32 +81,40 @@ def flash_attention_v2_single_batch(
             q_slice = q[row_slice, :, :]
 
         q_slice = q_slice.view(Br_size, num_heads, qk_head_size)
+        q_slice = q_slice.view(Br_size, num_groups, group_size, qk_head_size)
 
-        for Bc_idx in range(Bc_num):
-            logger.debug(f"{Bc_idx=}")
-            col_slice = slice(Bc_idx * Bc_size, (Bc_idx + 1) * Bc_size)
-            if (Bc_idx + 1) * Bc_size > kv_len:
-                # |---col_slice_real---|--col_slice_padding--|
-                col_slice_real = slice(Bc_idx * Bc_size, kv_len)
-                col_slice_padding = (Bc_idx + 1) * Bc_size - kv_len
-            else:
-                col_slice_real = None
+        for group_idx in range(num_groups):
+            logger.debug(f"{group_idx=}")
+            group_slice = slice(group_idx, group_idx + 1)
 
-            page_idx = page_table[Bc_idx]
+            o = torch.zeros(
+                Br_size, group_size, v_head_size, dtype=dtype, device=device
+            )
+            l = torch.zeros(Br_size, group_size, dtype=dtype, device=device)
+            m = (
+                torch.ones(Br_size, group_size, dtype=dtype, device=device)
+                * torch.finfo(dtype).min
+            )
 
-            k_page = k_cache[page_idx].view(Bc_size, num_kv_heads, qk_head_size)
-            v_page = v_cache[page_idx].view(Bc_size, num_kv_heads, v_head_size)
+            for Bc_idx in range(Bc_num):
+                logger.debug(f"{Bc_idx=}")
+                col_slice = slice(Bc_idx * Bc_size, (Bc_idx + 1) * Bc_size)
+                if (Bc_idx + 1) * Bc_size > kv_len:
+                    # |---col_slice_real---|--col_slice_padding--|
+                    col_slice_real = slice(Bc_idx * Bc_size, kv_len)
+                    col_slice_padding = (Bc_idx + 1) * Bc_size - kv_len
+                else:
+                    col_slice_real = None
 
-            # For gqa group
+                page_idx = page_table[Bc_idx]
 
-            q_slice = q_slice.view(Br_size, num_groups, group_size, qk_head_size)
+                k_page = k_cache[page_idx].view(Bc_size, num_kv_heads, qk_head_size)
+                v_page = v_cache[page_idx].view(Bc_size, num_kv_heads, v_head_size)
 
-            k_page = k_page.view(Bc_size, num_groups, 1, qk_head_size)
-            v_page = v_page.view(Bc_size, num_groups, 1, v_head_size)
+                # For gqa group
 
-            for group_idx in range(num_groups):
-                logger.debug(f"{group_idx=}")
-                group_slice = slice(group_idx, group_idx + 1)
+                k_page = k_page.view(Bc_size, num_groups, 1, qk_head_size)
+                v_page = v_page.view(Bc_size, num_groups, 1, v_head_size)
 
                 q_group_slice = q_slice[:, group_slice, :, :].reshape(
                     Br_size * group_size, qk_head_size
@@ -166,10 +144,8 @@ def flash_attention_v2_single_batch(
                 logger.debug(f"{S_ij=}")
 
                 # (Br_size, group_size)
-                m_group_slice = m[:, group_slice, :].reshape(Br_size, group_size)
-                l_group_slice = l[:, group_slice, :].reshape(Br_size, group_size)
                 m_ij, _ = torch.max(S_ij, dim=-1, keepdim=False)
-                m_new = torch.max(m_group_slice, m_ij)
+                m_new = torch.max(m, m_ij)
 
                 # (Br_size, group_size, Bc_size)
                 P_ij = torch.exp(S_ij - m_new.unsqueeze(-1))
@@ -178,31 +154,28 @@ def flash_attention_v2_single_batch(
 
                 # (Br_size, group_size)
                 l_ij = torch.sum(P_ij, dim=-1, keepdim=False) + 1e-10
-                l_new = torch.exp(m_group_slice - m_new) * l_group_slice + l_ij
+                l_new = torch.exp(m - m_new) * l + l_ij
 
                 # (Br_size, group_size, v_head_size)
-                o_group_slice = o_slice[:, group_slice, :, :].reshape(
-                    Br_size, group_size, v_head_size
+                o = (torch.exp(m - m_new).unsqueeze(-1) * o) + (
+                    torch.matmul(P_ij, v_group_slice)
                 )
-                o_group_slice = (
-                    torch.exp(m_group_slice - m_new).unsqueeze(-1) * o_group_slice
-                ) + (torch.matmul(P_ij, v_group_slice))
+                l = l_new
+                m = m_new
 
-                logger.debug(f"{o_group_slice=}")
+                logger.debug(f"{o=}")
 
-                o_slice[:, group_slice, :, :] = o_group_slice.reshape(
-                    Br_size, 1, group_size, v_head_size
-                )
-                l[:, group_slice, :] = l_new.reshape(Br_size, 1, group_size)
-                m[:, group_slice, :] = m_new.reshape(Br_size, 1, group_size)
+            o = o / l.unsqueeze(-1)
+            o = o.reshape(Br_size, 1, group_size, v_head_size)
 
-        o_slice = o_slice / l.unsqueeze(-1)
-        o_slice = o_slice.reshape(Br_size, num_heads, v_head_size)
+            if row_slice_real is not None:
+                out[row_slice_real, group_slice, :, :] = o[
+                    : (Br_size - row_slice_padding), :, :, :
+                ]
+            else:
+                out[row_slice, group_slice, :, :] = o
 
-        if row_slice_real is not None:
-            out[row_slice_real, :, :] = o_slice[: (Br_size - row_slice_padding), :, :]
-        else:
-            out[row_slice, :, :] = o_slice
+    out = out.view(seq_len, num_heads, v_head_size)
 
     return out
 
