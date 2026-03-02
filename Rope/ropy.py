@@ -9,9 +9,9 @@ def rotate_half(x):
     return torch.cat((-x2, x1), dim=-1)
 
 
-def rotate_query(q, m, theta):
+def rotate(x, m, theta):
     """
-    q: [d]  query向量
+    x: [d]  query/key 向量
     m: 位置（标量）
     theta: [d//2] 旋转频率
     """
@@ -22,45 +22,18 @@ def rotate_query(q, m, theta):
     sin = torch.sin(m_theta)  # [d/2]
 
     # 取出前后半部分
-    # d = q.shape[-1]
+    # d = x.shape[-1]
     # half_d = d // 2
-    # q_half1 = q[..., :half_d]
-    # q_half2 = q[..., half_d:]
-    # 计算旋转后的 q
-    # q_rotated_half1 = q_half1 * cos - q_half2 * sin  # Re部分
-    # q_rotated_half2 = q_half1 * sin + q_half2 * cos  # Im部分
+    # x_half1 = x[..., :half_d]
+    # x_half2 = x[..., half_d:]
+    # 计算旋转后的 x
+    # x_rotated_half1 = x_half1 * cos - x_half2 * sin  # Re部分
+    # x_rotated_half2 = x_half1 * sin + x_half2 * cos  # Im部分
     # 合并回 [d] 维向量
-    # q_rotated = torch.cat([q_rotated_half1, q_rotated_half2], dim=-1)
-    q_rotated = q * cos + rotate_half(q) * sin
+    # x_rotated = torch.cat([x_rotated_half1, x_rotated_half2], dim=-1)
+    x_rotated = x * cos + rotate_half(x) * sin
 
-    return q_rotated
-
-
-def rotate_key(k, n, theta):
-    """
-    k: [d]  key向量
-    n: 位置（标量）
-    theta: [d//2] 旋转频率
-    """
-
-    # 计算 cos(nθ) 和 sin(nθ)
-    n_theta = n * theta  # [d/2]
-    cos = torch.cos(n_theta)  # [d/2]
-    sin = torch.sin(n_theta)  # [d/2]
-
-    # 取出前后半部分
-    # d = k.shape[-1]
-    # half_d = d // 2
-    # k_half1 = k[..., :half_d]
-    # k_half2 = k[..., half_d:]
-    # 计算旋转后的 k
-    # k_rotated_half1 = k_half1 * cos + k_half2 * sin  # Re部分
-    # k_rotated_half2 = -k_half1 * sin + k_half2 * cos  # Im部分
-    # 合并回 [d] 维向量
-    # k_rotated = torch.cat([k_rotated_half1, k_rotated_half2], dim=-1)
-    k_rotated = k * cos - rotate_half(k) * sin
-
-    return k_rotated
+    return x_rotated
 
 
 def apply_rotary_pos_emb(q, k, cos, sin):
@@ -74,7 +47,7 @@ def apply_rotary_pos_emb(q, k, cos, sin):
         旋转后的qk
     """
     q_rotated = (q * cos) + (rotate_half(q) * sin)
-    k_rotated = (k * cos) - (rotate_half(k) * sin)
+    k_rotated = (k * cos) + (rotate_half(k) * sin)
 
     return q_rotated, k_rotated 
 
